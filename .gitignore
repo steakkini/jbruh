@@ -1,3 +1,5 @@
 src/images/*
 src/server/*
 src/rockyou-100.txt
+src/.DS_Store
+.DS_Store

@@ -1,94 +1,146 @@
-class JSONBrute:
-    def info(self, message):
-        print(f"\033[94m[*]\033[0m {message}")
+import requests
+import sys
+import time
+import multiprocessing
+from json import loads
+from multiprocessing import Queue, Lock, Process, current_process, Event
+from argparse import ArgumentParser
+from queue import Empty
 
-    def success(self, message):
-        print(f"\033[92m[+]\033[0m {message}")
 
-    def warning(self, message):
-        print(f"\033[93m[!]\033[0m {message}")
+def info(message):
+    print(f"\033[94m[*]\033[0m {message}")
 
-    def error(self, message):
-        print(f"\033[91m[-]\033[0m {message}")
+def success(message):
+    print(f"\033[92m[+]\033[0m {message}")
 
-    def parse_arguments(self):
-        from argparse import ArgumentParser
+def warning(message):
+    print(f"\033[93m[!]\033[0m {message}")
 
-        parser = ArgumentParser(description="A simple JSON bruteforce tool for penetration testers or hobbyists")
+def error(message):
+    print(f"\033[91m[-]\033[0m {message}")
 
-        parser.add_argument("--url", type=str, required=True, help="The URL to post the data to.")
-        parser.add_argument("--wordlist", type=str, required=True, help="The wordlist to use to fuzz with.")
-        parser.add_argument("--data", type=str, required=True, help="The JSON data to post.")
-        parser.add_argument("--verbose", nargs="?", const="false", help="Print every request.")
-        parser.add_argument("--code", type=int, nargs="?", const="201", help="The response code for a successful request (default 201).")
+def parse_arguments():
+    parser = ArgumentParser(description="A simple JSON bruteforce tool for penetration testers or hobbyists based on https://github.com/Jake-Ruston/JSONBrute")
 
-        return parser.parse_args()
+    parser.add_argument("--url", type=str, required=True, help="The URL to post the data to.")
+    parser.add_argument("--wordlist", type=str, required=True, help="The wordlist to use to fuzz with.")
+    parser.add_argument("--data", type=str, required=True, help="The JSON data to post.")
+    parser.add_argument("--processes", type=int, nargs="?", required=False, help="Number of processes to spawn (default 1)")
+    parser.add_argument("--verbose", nargs="?", const="false", help="Print every request.")
+    parser.add_argument("--code", type=int, nargs="?", const="401", help="The response code for an unsuccessful request")
 
-    def parse_wordlist(self, file):
-        with open(file, mode="r", encoding="iso-8859-1") as data:
-            wordlist = data.read().splitlines()
+    return parser.parse_args()
 
-            return wordlist
+def parse_wordlist(file):
+    with open(file, mode="r", encoding="iso-8859-1") as data:
+        wordlist = data.read().splitlines()
+        
+        return wordlist
 
-    def parse_json(self, data):
-        json = data.split(",")
-        json = [pair.strip().split("=") for pair in json]
-        json = {key: value for [key, value] in json}
 
-        return json
+def parse_json(data):
+    json = data.split(",")
+    json = [pair.strip().split("=") for pair in json]
+    json = {key: value for [key, value] in json}
 
-    def parse_fuzzed_parameter(self, json):
-        fuzzed = list(json.keys())[list(json.values()).index("FUZZ")]
+    return json
 
-        return fuzzed
+def parse_fuzzed_parameter(json):
+    fuzzed = list(json.keys())[list(json.values()).index("FUZZ")]
 
-    def find(self, args, wordlist):
-        from json import loads
-        import requests
+    return fuzzed
+    
 
-        for entry in wordlist:
+def do_job(queue, event, args):  
+    while True:
+        try:
+            entry = queue.get_nowait()
+        except Empty:
+            warning("Queue empty!")
+            warning(f"\"{fuzzed}\" not found")
+            event.set()
+            break
+        else:
             try:
+
                 headers = {
                     "Content-Type": "application/json"
                 }
-                json = self.parse_json(args.data)
-                fuzzed = self.parse_fuzzed_parameter(json)
-
+                json = parse_json(args.data)
+                fuzzed = parse_fuzzed_parameter(json)    
                 json = str(json)
                 json = json.replace("FUZZ", entry)
                 json = json.replace("'", "\"")
                 json = loads(json)
-
+            
                 request = requests.post(args.url, headers=headers, json=json)
 
-                # --code default value = 201
                 if not args.code:
-                    args.code = 201
-
-                if request.status_code == args.code:
-                    self.success(f"Found \"{fuzzed}\": {json[fuzzed]}")
+                    args.code = 401
+            
+                if request.status_code != args.code:
+                    success(f"Found \"{fuzzed}\": {json[fuzzed]}")
+                    event.set()
                     break
                 else:
                     if args.verbose:
-                        self.warning(f"Incorrect \"{fuzzed}\": {json[fuzzed]}")
+                        warning(f"Incorrect \"{fuzzed}\": {json[fuzzed]} ")
             except requests.ConnectionError:
-                self.error(f"Failed to connect to {args.url}")
-                raise SystemExit()
-            except KeyboardInterrupt:
-                self.error("Exiting...")
-                raise SystemExit()
-            except Exception as err:
-                self.error(f"Unknown error, please create an issue on github explaining what you did with this error: {err}")
-        else:
-            self.warning(f"\"{fuzzed}\" not found")
+                error(f"Failed to connect to {args.url}")
+                SystemExit()
+                       
 
-    def run(self):
-        args = self.parse_arguments()
-        wordlist = self.parse_wordlist(args.wordlist)
+def find(args, wordlist):
 
-        self.info(f"Starting JSONBrute on {args.url}")
+    event = Event()
+    number_of_processes = args.processes
+    
+    if not number_of_processes:
+        number_of_processes = 1   
+       
+    if number_of_processes > multiprocessing.cpu_count():
+        number_of_processes = multiprocessing.cpu_count()
+        info(f"Number of requested processes exceeds number of available CPU cores")
+        
+    if args.processes < 1:
+        number_of_processes = 1
+        info(f"Number of requested processes makes no sense")
+              
+    if number_of_processes == 1:
+        info(f"Spawning 1 process")
+    else:
+        info(f"Spawning {number_of_processes} processes")
+              
+    
+    processes = []
+    
+    queue = Queue()
+    for entry in wordlist:
+        queue.put(entry)      
+        
+    for w in range(number_of_processes):
+        p = Process(target=do_job, args=(queue, event, args))
+        processes.append(p)
+        p.start()
+        
+    while True:
+        try:
+            if event.is_set():
+                for p in processes:
+                    p.terminate()
+                sys.exit(1)
+            time.sleep(2)
+        except KeyboardInterrupt:
+            for p in processes:
+                p.terminate()
+            sys.exit(1)
+            time.sleep(2)
+        
 
-        self.find(args, wordlist)
+if __name__ == '__main__':
+        args = parse_arguments()
+        wordlist = parse_wordlist(args.wordlist)
+        info(f"Starting JSONBrute on {args.url}")
+        find(args, wordlist)
 
-
-JSONBrute().run()
